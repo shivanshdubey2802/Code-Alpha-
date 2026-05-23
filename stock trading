@@ -1,0 +1,696 @@
+import { useState, useEffect, useCallback, useRef } from "react";
+
+// ─────────────────────────────────────────────
+//  OOP CORE CLASSES
+// ─────────────────────────────────────────────
+
+class Stock {
+  constructor(symbol, name, price, sector, volatility = 0.02) {
+    this.symbol = symbol;
+    this.name = name;
+    this.price = price;
+    this.openPrice = price;
+    this.sector = sector;
+    this.volatility = volatility;
+    this.history = [{ time: Date.now(), price }];
+    this.change = 0;
+    this.changePct = 0;
+    this.volume = Math.floor(Math.random() * 5000000) + 500000;
+    this.marketCap = price * (Math.floor(Math.random() * 900) + 100) * 1000000;
+    this.pe = +(Math.random() * 40 + 10).toFixed(1);
+    this.week52High = price * (1 + Math.random() * 0.4);
+    this.week52Low = price * (1 - Math.random() * 0.3);
+  }
+
+  tick() {
+    const drift = (Math.random() - 0.495) * this.volatility;
+    const newPrice = Math.max(0.01, this.price * (1 + drift));
+    this.price = +newPrice.toFixed(2);
+    this.change = +(this.price - this.openPrice).toFixed(2);
+    this.changePct = +((this.change / this.openPrice) * 100).toFixed(2);
+    this.volume += Math.floor(Math.random() * 10000);
+    const now = Date.now();
+    this.history.push({ time: now, price: this.price });
+    if (this.history.length > 60) this.history.shift();
+    return this;
+  }
+
+  getInfo() {
+    return {
+      symbol: this.symbol,
+      name: this.name,
+      price: this.price,
+      change: this.change,
+      changePct: this.changePct,
+      sector: this.sector,
+      volume: this.volume,
+      marketCap: this.marketCap,
+      pe: this.pe,
+      week52High: +this.week52High.toFixed(2),
+      week52Low: +this.week52Low.toFixed(2),
+    };
+  }
+}
+
+class Transaction {
+  constructor(type, symbol, qty, price) {
+    this.id = `txn-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    this.type = type; // 'BUY' | 'SELL'
+    this.symbol = symbol;
+    this.qty = qty;
+    this.price = price;
+    this.total = +(qty * price).toFixed(2);
+    this.timestamp = Date.now();
+  }
+}
+
+class Portfolio {
+  constructor(userId, cash = 100000) {
+    this.userId = userId;
+    this.cash = cash;
+    this.holdings = {}; // { symbol: { qty, avgCost } }
+    this.transactions = [];
+  }
+
+  buy(symbol, qty, price) {
+    const cost = qty * price;
+    if (cost > this.cash) throw new Error("Insufficient funds");
+    if (qty <= 0) throw new Error("Invalid quantity");
+    this.cash = +(this.cash - cost).toFixed(2);
+    if (!this.holdings[symbol]) this.holdings[symbol] = { qty: 0, avgCost: 0 };
+    const h = this.holdings[symbol];
+    const totalCost = h.qty * h.avgCost + cost;
+    h.qty += qty;
+    h.avgCost = +(totalCost / h.qty).toFixed(4);
+    const txn = new Transaction("BUY", symbol, qty, price);
+    this.transactions.unshift(txn);
+    return txn;
+  }
+
+  sell(symbol, qty, price) {
+    if (!this.holdings[symbol] || this.holdings[symbol].qty < qty)
+      throw new Error("Not enough shares");
+    if (qty <= 0) throw new Error("Invalid quantity");
+    const h = this.holdings[symbol];
+    h.qty -= qty;
+    if (h.qty === 0) delete this.holdings[symbol];
+    this.cash = +(this.cash + qty * price).toFixed(2);
+    const txn = new Transaction("SELL", symbol, qty, price);
+    this.transactions.unshift(txn);
+    return txn;
+  }
+
+  getValue(stockMap) {
+    let equity = 0;
+    for (const [sym, h] of Object.entries(this.holdings)) {
+      const s = stockMap[sym];
+      if (s) equity += h.qty * s.price;
+    }
+    return +(this.cash + equity).toFixed(2);
+  }
+
+  getHoldingsPnL(stockMap) {
+    return Object.entries(this.holdings).map(([sym, h]) => {
+      const s = stockMap[sym];
+      const currentPrice = s ? s.price : 0;
+      const pnl = +((currentPrice - h.avgCost) * h.qty).toFixed(2);
+      const pnlPct = +(((currentPrice - h.avgCost) / h.avgCost) * 100).toFixed(2);
+      return { symbol: sym, qty: h.qty, avgCost: h.avgCost, currentPrice, pnl, pnlPct };
+    });
+  }
+
+  serialize() {
+    return JSON.stringify({ cash: this.cash, holdings: this.holdings, transactions: this.transactions.slice(0, 50) });
+  }
+
+  static deserialize(userId, data) {
+    const p = new Portfolio(userId, 0);
+    const parsed = JSON.parse(data);
+    p.cash = parsed.cash;
+    p.holdings = parsed.holdings;
+    p.transactions = parsed.transactions || [];
+    return p;
+  }
+}
+
+class User {
+  constructor(name, cash) {
+    this.id = `user-${Date.now()}`;
+    this.name = name;
+    this.portfolio = new Portfolio(this.id, cash);
+    this.netWorthHistory = [{ time: Date.now(), value: cash }];
+  }
+
+  recordNetWorth(stockMap) {
+    const value = this.portfolio.getValue(stockMap);
+    const now = Date.now();
+    this.netWorthHistory.push({ time: now, value });
+    if (this.netWorthHistory.length > 100) this.netWorthHistory.shift();
+    return value;
+  }
+}
+
+// ─────────────────────────────────────────────
+//  INITIAL DATA
+// ─────────────────────────────────────────────
+
+const INITIAL_STOCKS = [
+  new Stock("AAPL", "Apple Inc.", 189.30, "Technology", 0.018),
+  new Stock("MSFT", "Microsoft Corp.", 415.20, "Technology", 0.016),
+  new Stock("GOOGL", "Alphabet Inc.", 175.80, "Technology", 0.02),
+  new Stock("AMZN", "Amazon.com Inc.", 185.50, "Consumer", 0.022),
+  new Stock("NVDA", "NVIDIA Corp.", 875.40, "Technology", 0.035),
+  new Stock("TSLA", "Tesla Inc.", 175.20, "Automotive", 0.04),
+  new Stock("META", "Meta Platforms", 505.60, "Technology", 0.025),
+  new Stock("JPM", "JPMorgan Chase", 198.70, "Finance", 0.015),
+  new Stock("JNJ", "Johnson & Johnson", 158.40, "Healthcare", 0.012),
+  new Stock("WMT", "Walmart Inc.", 65.80, "Retail", 0.013),
+  new Stock("NFLX", "Netflix Inc.", 625.50, "Media", 0.028),
+  new Stock("DIS", "Walt Disney Co.", 105.30, "Media", 0.02),
+];
+
+const fmt = (n) => n.toLocaleString("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2 });
+const fmtNum = (n) => n.toLocaleString("en-US");
+const fmtM = (n) => n >= 1e9 ? `$${(n / 1e9).toFixed(2)}B` : `$${(n / 1e6).toFixed(0)}M`;
+
+// ─────────────────────────────────────────────
+//  SPARKLINE
+// ─────────────────────────────────────────────
+
+function Sparkline({ history, color }) {
+  if (!history || history.length < 2) return null;
+  const W = 80, H = 32;
+  const prices = history.map(h => h.price);
+  const min = Math.min(...prices), max = Math.max(...prices);
+  const range = max - min || 1;
+  const pts = prices.map((p, i) => {
+    const x = (i / (prices.length - 1)) * W;
+    const y = H - ((p - min) / range) * (H - 4) - 2;
+    return `${x},${y}`;
+  }).join(" ");
+  return (
+    <svg width={W} height={H} viewBox={`0 0 ${W} ${H}`} style={{ overflow: "visible" }}>
+      <polyline points={pts} fill="none" stroke={color} strokeWidth="1.5" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+// ─────────────────────────────────────────────
+//  MINI CHART (portfolio / stock detail)
+// ─────────────────────────────────────────────
+
+function MiniChart({ data, color, height = 120 }) {
+  if (!data || data.length < 2) return <div style={{ height }} />;
+  const W = 560, H = height;
+  const vals = data.map(d => d.price ?? d.value);
+  const min = Math.min(...vals), max = Math.max(...vals);
+  const range = max - min || 1;
+  const pts = vals.map((v, i) => {
+    const x = (i / (vals.length - 1)) * W;
+    const y = H - ((v - min) / range) * (H - 12) - 6;
+    return `${x},${y}`;
+  });
+  const area = [...pts.map(p => p), `${W},${H}`, `0,${H}`].join(" ");
+  return (
+    <svg width="100%" viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" style={{ display: "block", height }}>
+      <defs>
+        <linearGradient id={`grad-${color.replace("#","")}`} x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor={color} stopOpacity="0.18" />
+          <stop offset="100%" stopColor={color} stopOpacity="0.01" />
+        </linearGradient>
+      </defs>
+      <polygon points={area} fill={`url(#grad-${color.replace("#","")})`} />
+      <polyline points={pts.join(" ")} fill="none" stroke={color} strokeWidth="2" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+// ─────────────────────────────────────────────
+//  MAIN APP
+// ─────────────────────────────────────────────
+
+const STORAGE_KEY = "trading_platform_v1";
+
+export default function App() {
+  const stockMapRef = useRef({});
+  const [stocks, setStocks] = useState(() => {
+    const map = {};
+    INITIAL_STOCKS.forEach(s => { map[s.symbol] = s; });
+    stockMapRef.current = map;
+    return { ...map };
+  });
+
+  const userRef = useRef(null);
+  const [user, setUser] = useState(null);
+  const [setupDone, setSetupDone] = useState(false);
+  const [userName, setUserName] = useState("Trader");
+
+  const [tab, setTab] = useState("market");
+  const [selectedStock, setSelectedStock] = useState(null);
+  const [tradeStock, setTradeStock] = useState(null);
+  const [tradeType, setTradeType] = useState("BUY");
+  const [tradeQty, setTradeQty] = useState(1);
+  const [tradeMsg, setTradeMsg] = useState(null);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [sortBy, setSortBy] = useState("symbol");
+  const [sortDir, setSortDir] = useState(1);
+
+  // Init user from storage or fresh
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem(STORAGE_KEY);
+      if (saved) {
+        const data = JSON.parse(saved);
+        const u = new User(data.name, 0);
+        u.id = data.id;
+        u.portfolio = Portfolio.deserialize(u.id, JSON.stringify(data.portfolio));
+        u.netWorthHistory = data.netWorthHistory || [{ time: Date.now(), value: u.portfolio.cash }];
+        userRef.current = u;
+        setUser({ ...u, portfolio: { ...u.portfolio } });
+        setSetupDone(true);
+      }
+    } catch {}
+  }, []);
+
+  const saveUser = useCallback((u) => {
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({
+        id: u.id, name: u.name,
+        portfolio: JSON.parse(u.portfolio.serialize()),
+        netWorthHistory: u.netWorthHistory.slice(-100),
+      }));
+    } catch {}
+  }, []);
+
+  const handleSetup = () => {
+    const u = new User(userName.trim() || "Trader", 100000);
+    userRef.current = u;
+    setUser({ ...u, portfolio: { ...u.portfolio } });
+    saveUser(u);
+    setSetupDone(true);
+  };
+
+  // Market tick every 1.5s
+  useEffect(() => {
+    const id = setInterval(() => {
+      const map = stockMapRef.current;
+      Object.values(map).forEach(s => s.tick());
+      stockMapRef.current = { ...map };
+      setStocks({ ...map });
+
+      if (userRef.current) {
+        userRef.current.recordNetWorth(stockMapRef.current);
+        setUser(u => u ? { ...u, _t: Date.now() } : u);
+      }
+    }, 1500);
+    return () => clearInterval(id);
+  }, []);
+
+  const syncUser = useCallback(() => {
+    const u = userRef.current;
+    if (!u) return;
+    setUser({ name: u.name, id: u.id, portfolio: { ...u.portfolio, holdings: { ...u.portfolio.holdings }, transactions: [...u.portfolio.transactions] }, netWorthHistory: [...u.netWorthHistory] });
+    saveUser(u);
+  }, [saveUser]);
+
+  const executeTrade = () => {
+    const u = userRef.current;
+    if (!u || !tradeStock) return;
+    const stock = stockMapRef.current[tradeStock.symbol];
+    const qty = parseInt(tradeQty);
+    if (!qty || qty < 1) { setTradeMsg({ type: "error", text: "Enter a valid quantity." }); return; }
+    try {
+      if (tradeType === "BUY") u.portfolio.buy(stock.symbol, qty, stock.price);
+      else u.portfolio.sell(stock.symbol, qty, stock.price);
+      syncUser();
+      setTradeMsg({ type: "success", text: `${tradeType} ${qty} × ${stock.symbol} @ ${fmt(stock.price)}` });
+      setTimeout(() => setTradeMsg(null), 3000);
+    } catch (e) {
+      setTradeMsg({ type: "error", text: e.message });
+    }
+  };
+
+  // ─── Views ───
+
+  if (!setupDone) return (
+    <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: "#0d1117", fontFamily: "'IBM Plex Mono', monospace" }}>
+      <style>{`@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap');`}</style>
+      <div style={{ background: "#161b22", border: "1px solid #30363d", borderRadius: 12, padding: "40px 48px", maxWidth: 400, width: "100%", textAlign: "center" }}>
+        <div style={{ fontSize: 36, marginBottom: 8 }}>📈</div>
+        <h1 style={{ color: "#e6edf3", fontFamily: "'IBM Plex Mono'", fontSize: 22, marginBottom: 4 }}>TradeDesk</h1>
+        <p style={{ color: "#8b949e", fontSize: 13, marginBottom: 28 }}>Simulated Stock Trading Platform</p>
+        <input value={userName} onChange={e => setUserName(e.target.value)} onKeyDown={e => e.key === "Enter" && handleSetup()}
+          placeholder="Your name" style={{ width: "100%", background: "#0d1117", border: "1px solid #30363d", borderRadius: 6, padding: "10px 14px", color: "#e6edf3", fontSize: 14, fontFamily: "'IBM Plex Mono'", marginBottom: 16, boxSizing: "border-box", outline: "none" }} />
+        <button onClick={handleSetup} style={{ width: "100%", background: "#238636", border: "none", borderRadius: 6, padding: "11px 0", color: "#fff", fontSize: 14, fontFamily: "'IBM Plex Mono'", cursor: "pointer", fontWeight: 600 }}>
+          Start with $100,000 →
+        </button>
+        <p style={{ color: "#484f58", fontSize: 11, marginTop: 16 }}>Virtual money only. No real trades.</p>
+      </div>
+    </div>
+  );
+
+  const totalValue = userRef.current ? userRef.current.portfolio.getValue(stockMapRef.current) : 0;
+  const startValue = 100000;
+  const totalPnL = +(totalValue - startValue).toFixed(2);
+  const totalPnLPct = +((totalPnL / startValue) * 100).toFixed(2);
+  const holdings = userRef.current ? userRef.current.portfolio.getHoldingsPnL(stockMapRef.current) : [];
+  const transactions = user?.portfolio?.transactions || [];
+  const netWorthHistory = userRef.current?.netWorthHistory || [];
+
+  const stockList = Object.values(stocks);
+  const filtered = stockList.filter(s =>
+    s.symbol.includes(searchQuery.toUpperCase()) || s.name.toLowerCase().includes(searchQuery.toLowerCase())
+  ).sort((a, b) => {
+    const av = sortBy === "price" ? a.price : sortBy === "change" ? a.changePct : a.symbol;
+    const bv = sortBy === "price" ? b.price : sortBy === "change" ? b.changePct : b.symbol;
+    return (av < bv ? -1 : av > bv ? 1 : 0) * sortDir;
+  });
+
+  const detail = selectedStock ? stockMapRef.current[selectedStock] : null;
+
+  // ─── STYLES ───
+  const s = {
+    app: { minHeight: "100vh", background: "#0d1117", fontFamily: "'IBM Plex Sans', sans-serif", color: "#e6edf3" },
+    nav: { background: "#161b22", borderBottom: "1px solid #30363d", padding: "0 20px", display: "flex", alignItems: "center", gap: 0, height: 52 },
+    logo: { color: "#58a6ff", fontFamily: "'IBM Plex Mono'", fontWeight: 600, fontSize: 16, marginRight: 32 },
+    tab: (active) => ({ padding: "0 16px", height: "100%", display: "flex", alignItems: "center", fontSize: 13, fontWeight: 500, cursor: "pointer", color: active ? "#e6edf3" : "#8b949e", borderBottom: active ? "2px solid #58a6ff" : "2px solid transparent", background: "none", border: "none", borderBottom: active ? "2px solid #58a6ff" : "2px solid transparent", fontFamily: "'IBM Plex Sans'", gap: 6 }),
+    main: { padding: "20px", maxWidth: 1100, margin: "0 auto" },
+    card: { background: "#161b22", border: "1px solid #30363d", borderRadius: 10, padding: "16px 20px" },
+    positive: { color: "#3fb950" },
+    negative: { color: "#f85149" },
+    neutral: { color: "#8b949e" },
+    badge: (pos) => ({ display: "inline-block", padding: "2px 8px", borderRadius: 20, fontSize: 11, fontFamily: "'IBM Plex Mono'", background: pos ? "#1a3928" : "#3d1c1c", color: pos ? "#3fb950" : "#f85149", fontWeight: 600 }),
+    th: { color: "#8b949e", fontSize: 11, fontFamily: "'IBM Plex Mono'", fontWeight: 500, padding: "8px 12px", textAlign: "left", borderBottom: "1px solid #21262d", cursor: "pointer", userSelect: "none" },
+    td: { fontSize: 13, padding: "10px 12px", borderBottom: "1px solid #21262d" },
+    btn: (variant) => ({ padding: "8px 20px", borderRadius: 6, fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: "'IBM Plex Sans'", border: "none", background: variant === "buy" ? "#238636" : variant === "sell" ? "#b91c1c" : "#30363d", color: variant === "sell" ? "#fca5a5" : "#fff" }),
+    input: { background: "#0d1117", border: "1px solid #30363d", borderRadius: 6, padding: "8px 12px", color: "#e6edf3", fontSize: 13, fontFamily: "'IBM Plex Mono'", outline: "none", width: 80 },
+  };
+
+  return (
+    <div style={s.app}>
+      <style>{`@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap'); * { box-sizing: border-box; } ::-webkit-scrollbar { width: 4px; } ::-webkit-scrollbar-track { background: #0d1117; } ::-webkit-scrollbar-thumb { background: #30363d; border-radius: 2px; }`}</style>
+
+      {/* NAV */}
+      <nav style={s.nav}>
+        <span style={s.logo}>📈 TradeDesk</span>
+        {[["market", "Market"], ["portfolio", "Portfolio"], ["history", "History"]].map(([id, label]) => (
+          <button key={id} style={s.tab(tab === id)} onClick={() => { setTab(id); setSelectedStock(null); }}>{label}</button>
+        ))}
+        <div style={{ flex: 1 }} />
+        <div style={{ textAlign: "right" }}>
+          <div style={{ fontSize: 12, color: "#8b949e" }}>{user?.name}</div>
+          <div style={{ fontSize: 13, fontFamily: "'IBM Plex Mono'", color: totalPnL >= 0 ? "#3fb950" : "#f85149", fontWeight: 600 }}>{fmt(totalValue)}</div>
+        </div>
+      </nav>
+
+      <div style={s.main}>
+
+        {/* ── MARKET TAB ── */}
+        {tab === "market" && !selectedStock && (
+          <div>
+            {/* Summary bar */}
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12, marginBottom: 20 }}>
+              {[
+                { label: "Portfolio Value", val: fmt(totalValue), sub: null },
+                { label: "Cash Available", val: fmt(userRef.current?.portfolio.cash || 0), sub: null },
+                { label: "Total P&L", val: fmt(totalPnL), pos: totalPnL >= 0 },
+                { label: "Return", val: `${totalPnLPct >= 0 ? "+" : ""}${totalPnLPct}%`, pos: totalPnLPct >= 0 },
+              ].map((m, i) => (
+                <div key={i} style={{ ...s.card, padding: "14px 16px" }}>
+                  <div style={{ fontSize: 11, color: "#8b949e", marginBottom: 4, fontFamily: "'IBM Plex Mono'" }}>{m.label}</div>
+                  <div style={{ fontSize: 20, fontWeight: 600, fontFamily: "'IBM Plex Mono'", color: m.pos === undefined ? "#e6edf3" : m.pos ? "#3fb950" : "#f85149" }}>{m.val}</div>
+                </div>
+              ))}
+            </div>
+
+            {/* Search + sort */}
+            <div style={{ display: "flex", gap: 12, marginBottom: 16, alignItems: "center" }}>
+              <input value={searchQuery} onChange={e => setSearchQuery(e.target.value)} placeholder="Search stocks…" style={{ ...s.input, width: 200 }} />
+              {[["symbol", "Symbol"], ["price", "Price"], ["change", "Change"]].map(([k, label]) => (
+                <button key={k} onClick={() => { if (sortBy === k) setSortDir(d => -d); else { setSortBy(k); setSortDir(1); } }}
+                  style={{ ...s.btn("neutral"), padding: "6px 14px", fontSize: 12, background: sortBy === k ? "#1f6feb" : "#21262d", color: "#e6edf3" }}>
+                  {label} {sortBy === k ? (sortDir === 1 ? "↑" : "↓") : ""}
+                </button>
+              ))}
+            </div>
+
+            {/* Stock table */}
+            <div style={s.card}>
+              <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                <thead>
+                  <tr>
+                    {["Symbol", "Company", "Price", "Change", "Volume", "Sector", "Chart", ""].map(h => (
+                      <th key={h} style={s.th}>{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {filtered.map(stock => (
+                    <tr key={stock.symbol} style={{ cursor: "pointer" }} onClick={() => setSelectedStock(stock.symbol)}
+                      onMouseEnter={e => e.currentTarget.style.background = "#1c2128"}
+                      onMouseLeave={e => e.currentTarget.style.background = "transparent"}>
+                      <td style={{ ...s.td, fontFamily: "'IBM Plex Mono'", fontWeight: 600, color: "#58a6ff" }}>{stock.symbol}</td>
+                      <td style={{ ...s.td, color: "#8b949e", fontSize: 12 }}>{stock.name}</td>
+                      <td style={{ ...s.td, fontFamily: "'IBM Plex Mono'", fontWeight: 500 }}>{fmt(stock.price)}</td>
+                      <td style={s.td}>
+                        <span style={s.badge(stock.changePct >= 0)}>{stock.changePct >= 0 ? "+" : ""}{stock.changePct}%</span>
+                      </td>
+                      <td style={{ ...s.td, color: "#8b949e", fontFamily: "'IBM Plex Mono'", fontSize: 12 }}>{fmtNum(stock.volume)}</td>
+                      <td style={{ ...s.td, fontSize: 11, color: "#8b949e" }}>{stock.sector}</td>
+                      <td style={s.td}>
+                        <Sparkline history={stock.history} color={stock.changePct >= 0 ? "#3fb950" : "#f85149"} />
+                      </td>
+                      <td style={s.td}>
+                        <button style={s.btn("buy")} onClick={e => { e.stopPropagation(); setTradeStock(stock); setTradeType("BUY"); setTradeQty(1); setTradeMsg(null); }}>Buy</button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
+        {/* ── STOCK DETAIL ── */}
+        {tab === "market" && selectedStock && detail && (
+          <div>
+            <button onClick={() => setSelectedStock(null)} style={{ ...s.btn("neutral"), marginBottom: 16, fontSize: 12 }}>← Back to Market</button>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 320px", gap: 16 }}>
+              <div>
+                <div style={s.card}>
+                  <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 16 }}>
+                    <div>
+                      <h2 style={{ margin: 0, fontFamily: "'IBM Plex Mono'", color: "#58a6ff", fontSize: 24 }}>{detail.symbol}</h2>
+                      <div style={{ color: "#8b949e", fontSize: 14 }}>{detail.name} · {detail.sector}</div>
+                    </div>
+                    <div style={{ textAlign: "right" }}>
+                      <div style={{ fontFamily: "'IBM Plex Mono'", fontSize: 28, fontWeight: 600 }}>{fmt(detail.price)}</div>
+                      <span style={s.badge(detail.changePct >= 0)}>{detail.changePct >= 0 ? "+" : ""}{detail.changePct}% today</span>
+                    </div>
+                  </div>
+                  <MiniChart data={detail.history} color={detail.changePct >= 0 ? "#3fb950" : "#f85149"} height={140} />
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12, marginTop: 16 }}>
+                    {[["Market Cap", fmtM(detail.marketCap)], ["P/E Ratio", detail.pe], ["52W High", fmt(detail.week52High)], ["52W Low", fmt(detail.week52Low)]].map(([l, v]) => (
+                      <div key={l} style={{ background: "#0d1117", borderRadius: 8, padding: "10px 12px" }}>
+                        <div style={{ fontSize: 11, color: "#8b949e", marginBottom: 2 }}>{l}</div>
+                        <div style={{ fontFamily: "'IBM Plex Mono'", fontSize: 14, fontWeight: 500 }}>{v}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+
+              {/* Trade panel */}
+              <div style={s.card}>
+                <h3 style={{ margin: "0 0 16px", fontSize: 15, fontFamily: "'IBM Plex Mono'" }}>Trade {detail.symbol}</h3>
+                <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
+                  {["BUY", "SELL"].map(t => (
+                    <button key={t} onClick={() => setTradeType(t)} style={{ flex: 1, padding: "9px 0", borderRadius: 6, border: "none", cursor: "pointer", fontWeight: 600, fontSize: 13, fontFamily: "'IBM Plex Mono'", background: tradeType === t ? (t === "BUY" ? "#238636" : "#b91c1c") : "#21262d", color: tradeType === t ? "#fff" : "#8b949e" }}>{t}</button>
+                  ))}
+                </div>
+                <div style={{ marginBottom: 12 }}>
+                  <div style={{ fontSize: 11, color: "#8b949e", marginBottom: 6 }}>QUANTITY</div>
+                  <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                    <button onClick={() => setTradeQty(q => Math.max(1, q - 1))} style={{ ...s.btn("neutral"), padding: "6px 12px" }}>−</button>
+                    <input type="number" min="1" value={tradeQty} onChange={e => setTradeQty(Math.max(1, parseInt(e.target.value) || 1))} style={{ ...s.input, width: 80, textAlign: "center" }} />
+                    <button onClick={() => setTradeQty(q => q + 1)} style={{ ...s.btn("neutral"), padding: "6px 12px" }}>+</button>
+                  </div>
+                </div>
+                <div style={{ background: "#0d1117", borderRadius: 8, padding: "12px", marginBottom: 16 }}>
+                  {[["Price", fmt(detail.price)], ["Quantity", tradeQty], ["Estimated Total", fmt(detail.price * tradeQty)]].map(([l, v]) => (
+                    <div key={l} style={{ display: "flex", justifyContent: "space-between", marginBottom: 6, fontSize: 13 }}>
+                      <span style={{ color: "#8b949e" }}>{l}</span>
+                      <span style={{ fontFamily: "'IBM Plex Mono'" }}>{v}</span>
+                    </div>
+                  ))}
+                  <div style={{ borderTop: "1px solid #21262d", paddingTop: 6, display: "flex", justifyContent: "space-between", fontSize: 13 }}>
+                    <span style={{ color: "#8b949e" }}>Cash available</span>
+                    <span style={{ fontFamily: "'IBM Plex Mono'", color: "#3fb950" }}>{fmt(userRef.current?.portfolio.cash || 0)}</span>
+                  </div>
+                  {tradeType === "SELL" && userRef.current?.portfolio.holdings[detail.symbol] && (
+                    <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, color: "#8b949e", marginTop: 4 }}>
+                      <span>Shares owned</span>
+                      <span style={{ fontFamily: "'IBM Plex Mono'" }}>{userRef.current.portfolio.holdings[detail.symbol].qty}</span>
+                    </div>
+                  )}
+                </div>
+                {tradeMsg && (
+                  <div style={{ padding: "8px 12px", borderRadius: 6, marginBottom: 12, fontSize: 12, fontFamily: "'IBM Plex Mono'", background: tradeMsg.type === "success" ? "#1a3928" : "#3d1c1c", color: tradeMsg.type === "success" ? "#3fb950" : "#f85149", border: `1px solid ${tradeMsg.type === "success" ? "#2ea043" : "#f85149"}30` }}>{tradeMsg.text}</div>
+                )}
+                <button onClick={() => { setTradeStock(detail); executeTrade(); }} style={{ ...s.btn(tradeType.toLowerCase()), width: "100%", padding: "11px 0", fontSize: 14 }}>
+                  {tradeType === "BUY" ? "Buy" : "Sell"} {tradeQty} Share{tradeQty > 1 ? "s" : ""}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ── PORTFOLIO TAB ── */}
+        {tab === "portfolio" && (
+          <div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12, marginBottom: 20 }}>
+              {[
+                { label: "Total Value", val: fmt(totalValue) },
+                { label: "Cash", val: fmt(userRef.current?.portfolio.cash || 0) },
+                { label: "Equity", val: fmt(totalValue - (userRef.current?.portfolio.cash || 0)) },
+                { label: "Total Return", val: `${totalPnLPct >= 0 ? "+" : ""}${totalPnLPct}%`, pos: totalPnLPct >= 0 },
+              ].map((m, i) => (
+                <div key={i} style={{ ...s.card, padding: "14px 16px" }}>
+                  <div style={{ fontSize: 11, color: "#8b949e", marginBottom: 4, fontFamily: "'IBM Plex Mono'" }}>{m.label}</div>
+                  <div style={{ fontSize: 20, fontWeight: 600, fontFamily: "'IBM Plex Mono'", color: m.pos === undefined ? "#e6edf3" : m.pos ? "#3fb950" : "#f85149" }}>{m.val}</div>
+                </div>
+              ))}
+            </div>
+
+            {/* Net worth chart */}
+            <div style={{ ...s.card, marginBottom: 16 }}>
+              <div style={{ fontSize: 12, color: "#8b949e", marginBottom: 12, fontFamily: "'IBM Plex Mono'" }}>NET WORTH OVER TIME</div>
+              <MiniChart data={netWorthHistory} color={totalPnL >= 0 ? "#3fb950" : "#f85149"} height={100} />
+            </div>
+
+            {/* Holdings */}
+            {holdings.length === 0 ? (
+              <div style={{ ...s.card, textAlign: "center", padding: 40, color: "#484f58" }}>
+                <div style={{ fontSize: 32, marginBottom: 8 }}>📭</div>
+                <div>No holdings yet. Buy some stocks from the Market tab.</div>
+              </div>
+            ) : (
+              <div style={s.card}>
+                <div style={{ fontSize: 12, color: "#8b949e", marginBottom: 12, fontFamily: "'IBM Plex Mono'" }}>HOLDINGS</div>
+                <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                  <thead>
+                    <tr>
+                      {["Symbol", "Shares", "Avg Cost", "Current Price", "Market Value", "P&L", "Return", ""].map(h => (
+                        <th key={h} style={s.th}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {holdings.map(h => {
+                      const mv = +(h.qty * h.currentPrice).toFixed(2);
+                      return (
+                        <tr key={h.symbol} onMouseEnter={e => e.currentTarget.style.background = "#1c2128"} onMouseLeave={e => e.currentTarget.style.background = "transparent"}>
+                          <td style={{ ...s.td, fontFamily: "'IBM Plex Mono'", color: "#58a6ff", fontWeight: 600, cursor: "pointer" }} onClick={() => { setTab("market"); setSelectedStock(h.symbol); }}>{h.symbol}</td>
+                          <td style={{ ...s.td, fontFamily: "'IBM Plex Mono'" }}>{h.qty}</td>
+                          <td style={{ ...s.td, fontFamily: "'IBM Plex Mono'", color: "#8b949e" }}>{fmt(h.avgCost)}</td>
+                          <td style={{ ...s.td, fontFamily: "'IBM Plex Mono'" }}>{fmt(h.currentPrice)}</td>
+                          <td style={{ ...s.td, fontFamily: "'IBM Plex Mono'" }}>{fmt(mv)}</td>
+                          <td style={{ ...s.td, fontFamily: "'IBM Plex Mono'", color: h.pnl >= 0 ? "#3fb950" : "#f85149" }}>{h.pnl >= 0 ? "+" : ""}{fmt(h.pnl)}</td>
+                          <td style={s.td}><span style={s.badge(h.pnlPct >= 0)}>{h.pnlPct >= 0 ? "+" : ""}{h.pnlPct}%</span></td>
+                          <td style={s.td}>
+                            <button style={s.btn("sell")} onClick={() => { setTab("market"); setSelectedStock(h.symbol); setTradeType("SELL"); }}>Sell</button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ── HISTORY TAB ── */}
+        {tab === "history" && (
+          <div>
+            <div style={{ ...s.card, marginBottom: 16 }}>
+              <div style={{ fontSize: 12, color: "#8b949e", marginBottom: 12, fontFamily: "'IBM Plex Mono'" }}>TRANSACTION HISTORY ({transactions.length} trades)</div>
+              {transactions.length === 0 ? (
+                <div style={{ textAlign: "center", padding: "32px 0", color: "#484f58" }}>No transactions yet.</div>
+              ) : (
+                <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                  <thead>
+                    <tr>
+                      {["Type", "Symbol", "Shares", "Price", "Total", "Time"].map(h => (
+                        <th key={h} style={s.th}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {transactions.map(t => (
+                      <tr key={t.id} onMouseEnter={e => e.currentTarget.style.background = "#1c2128"} onMouseLeave={e => e.currentTarget.style.background = "transparent"}>
+                        <td style={s.td}><span style={{ ...s.badge(t.type === "BUY"), letterSpacing: 1 }}>{t.type}</span></td>
+                        <td style={{ ...s.td, fontFamily: "'IBM Plex Mono'", color: "#58a6ff", fontWeight: 600 }}>{t.symbol}</td>
+                        <td style={{ ...s.td, fontFamily: "'IBM Plex Mono'" }}>{t.qty}</td>
+                        <td style={{ ...s.td, fontFamily: "'IBM Plex Mono'" }}>{fmt(t.price)}</td>
+                        <td style={{ ...s.td, fontFamily: "'IBM Plex Mono'", fontWeight: 500 }}>{fmt(t.total)}</td>
+                        <td style={{ ...s.td, fontSize: 12, color: "#8b949e" }}>{new Date(t.timestamp).toLocaleTimeString()}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+
+            {/* Stats */}
+            {transactions.length > 0 && (() => {
+              const buys = transactions.filter(t => t.type === "BUY");
+              const sells = transactions.filter(t => t.type === "SELL");
+              const totalBought = buys.reduce((a, t) => a + t.total, 0);
+              const totalSold = sells.reduce((a, t) => a + t.total, 0);
+              return (
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12 }}>
+                  {[["Total Trades", transactions.length], ["Buy Orders", buys.length], ["Sell Orders", sells.length], ["Volume Traded", fmt(totalBought + totalSold)]].map(([l, v]) => (
+                    <div key={l} style={{ ...s.card, padding: "14px 16px" }}>
+                      <div style={{ fontSize: 11, color: "#8b949e", marginBottom: 4, fontFamily: "'IBM Plex Mono'" }}>{l}</div>
+                      <div style={{ fontSize: 18, fontWeight: 600, fontFamily: "'IBM Plex Mono'" }}>{v}</div>
+                    </div>
+                  ))}
+                </div>
+              );
+            })()}
+          </div>
+        )}
+
+        {/* Quick-trade modal (from market table Buy button) */}
+        {tradeStock && tab === "market" && !selectedStock && (
+          <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.7)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50 }}
+            onClick={e => { if (e.target === e.currentTarget) { setTradeStock(null); setTradeMsg(null); } }}>
+            <div style={{ background: "#161b22", border: "1px solid #30363d", borderRadius: 12, padding: "24px", width: 340 }}>
+              <h3 style={{ margin: "0 0 16px", fontFamily: "'IBM Plex Mono'", color: "#58a6ff" }}>Quick Trade — {tradeStock.symbol}</h3>
+              <div style={{ fontSize: 13, color: "#8b949e", marginBottom: 16 }}>Current Price: <strong style={{ color: "#e6edf3", fontFamily: "'IBM Plex Mono'" }}>{fmt(tradeStock.price)}</strong></div>
+              <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
+                {["BUY", "SELL"].map(t => (
+                  <button key={t} onClick={() => setTradeType(t)} style={{ flex: 1, padding: "8px", borderRadius: 6, border: "none", cursor: "pointer", fontWeight: 600, fontSize: 13, background: tradeType === t ? (t === "BUY" ? "#238636" : "#b91c1c") : "#21262d", color: tradeType === t ? "#fff" : "#8b949e" }}>{t}</button>
+                ))}
+              </div>
+              <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 16 }}>
+                <button onClick={() => setTradeQty(q => Math.max(1, q - 1))} style={{ ...s.btn("neutral"), padding: "6px 12px" }}>−</button>
+                <input type="number" min="1" value={tradeQty} onChange={e => setTradeQty(Math.max(1, parseInt(e.target.value) || 1))} style={{ ...s.input, flex: 1, textAlign: "center" }} />
+                <button onClick={() => setTradeQty(q => q + 1)} style={{ ...s.btn("neutral"), padding: "6px 12px" }}>+</button>
+              </div>
+              <div style={{ background: "#0d1117", borderRadius: 8, padding: 12, marginBottom: 14, fontSize: 13, fontFamily: "'IBM Plex Mono'" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", color: "#8b949e" }}><span>Total</span><span style={{ color: "#e6edf3" }}>{fmt(tradeStock.price * tradeQty)}</span></div>
+              </div>
+              {tradeMsg && <div style={{ padding: "8px 12px", borderRadius: 6, marginBottom: 12, fontSize: 12, fontFamily: "'IBM Plex Mono'", background: tradeMsg.type === "success" ? "#1a3928" : "#3d1c1c", color: tradeMsg.type === "success" ? "#3fb950" : "#f85149" }}>{tradeMsg.text}</div>}
+              <button onClick={executeTrade} style={{ ...s.btn(tradeType.toLowerCase()), width: "100%", padding: "11px 0" }}>
+                Confirm {tradeType}
+              </button>
+            </div>
+          </div>
+        )}
+
+      </div>
+    </div>
+  );
+}
